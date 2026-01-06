@@ -46,15 +46,29 @@ LOG_PATH = os.path.join(BASE_DIR, LOG_FILE_NAME)
 # Excel 工作表名称
 TARGET_SHEET_NAME = "Sheet2"
 
+# 数据起始行 (从第几行开始读取数据，跳过表头)
+DATA_START_ROW = 108415
+
 # 每批处理的数据量
 BATCH_SIZE = 1000
 
-# Excel 列定义 (1 表示 A 列, 2 表示 B 列, 以此类推)
+# --- 输入列定义 (1 表示 A 列, 2 表示 B 列, 以此类推) ---
 COL_JCL_NAME = 3   # C列: JCL 文件名
 COL_DATASET = 7    # G列: Dataset 名称
 COL_RECFM = 12     # L列: 记录格式 (RECFM)
 COL_LRECL = 13     # M列: 记录长度 (LRECL)
 COL_BLKSIZE = 14   # N列: 块大小 (BLKSIZE)
+
+# --- 输出列定义 ---
+COL_OUT_SOURCE = 26   # Z列: 数据来源
+COL_OUT_RECFM = 27    # AA列: RECFM
+COL_OUT_LRECL = 28    # AB列: LRECL
+COL_OUT_BLKSIZE = 29  # AC列: BLKSIZE
+COL_OUT_STATUS = 32   # AF列: 处理状态
+COL_OUT_JCL = 33      # AG列: JCL 文件名
+COL_OUT_STEP = 34     # AH列: STEP 名称
+COL_OUT_PGM = 35      # AI列: 程序名
+COL_OUT_DD = 36       # AJ列: DD 名称
 
 
 # ==================== 日志配置 ====================
@@ -381,9 +395,8 @@ def main():
     # 按 JCL 文件名分组
     groups = defaultdict(list)
     row_counter = 0
-    begin_row = 108415  # 数据起始行
 
-    for row in ws_reader.iter_rows(min_row=begin_row, values_only=True):
+    for row in ws_reader.iter_rows(min_row=DATA_START_ROW, values_only=True):
         row_counter += 1
         
         if row_counter % 50000 == 0:
@@ -406,7 +419,7 @@ def main():
             needs_process = (recfm_str == "0" or recfm_str == "")
 
             groups[jcl_name].append({
-                "row_idx": row_counter + begin_row - 1,
+                "row_idx": row_counter + DATA_START_ROW - 1,
                 "dataset": row[COL_DATASET - 1],
                 "recfm_val": recfm_str,
                 "lrecl_val": row[COL_LRECL - 1],
@@ -499,11 +512,11 @@ def main():
                 for i, item in enumerate(current_batch):
                     row_num = item["row"]
                     
-                    # 写入物理属性 (Z=26, AA=27, AB=28, AC=29)
-                    ws.range((row_num, 26)).value = item["vals_attr"]
+                    # 写入物理属性 (Z~AC 列)
+                    ws.range((row_num, COL_OUT_SOURCE)).value = item["vals_attr"]
                     
-                    # 写入元数据 (AF=32, AG=33, AH=34, AI=35, AJ=36)
-                    ws.range((row_num, 32)).value = item["vals_meta"]
+                    # 写入元数据 (AF~AJ 列)
+                    ws.range((row_num, COL_OUT_STATUS)).value = item["vals_meta"]
                     
                     if i % 50 == 0:
                         print(f"\r  进度: {i}/{len(current_batch)}", end="")
