@@ -304,6 +304,225 @@ def test_disp_parsing():
         if os.path.exists(filename):
             os.remove(filename)
 
+# ==================== 边界情况和异常测试 ====================
+
+def test_empty_jcl():
+    """测试 7: 空 JCL 文件"""
+    print(f"\n{'='*60}")
+    print(f"测试: 空 JCL 文件")
+    print(f"{'='*60}")
+    
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//* 只有注释，没有任何 STEP
+    """
+    filename = "temp_test_empty.jcl"
+    
+    with open(filename, "w", encoding='utf-8') as f:
+        f.write(jcl)
+    
+    try:
+        parser = Jcl.JCLParser(filename)
+        
+        # 应该没有解析到任何 STEP
+        if not parser.steps:
+            print(f"  parser.steps 为空: ✅ 符合预期")
+            print(f"\n  🟢 通过")
+            return True
+        else:
+            print(f"  parser.steps 不为空: ❌ 不符合预期")
+            print(f"\n  🔴 失败")
+            return False
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
+
+
+def test_dsn_not_found():
+    """测试 8: 目标 DSN 在 JCL 中不存在"""
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//STEP01   EXEC PGM=PROG1
+//INFILE   DD DSN=OTHER.DATA,DISP=SHR
+    """
+    print(f"\n{'='*60}")
+    print(f"测试: DSN 不存在")
+    print(f"{'='*60}")
+    
+    filename = "temp_test_notfound.jcl"
+    target_dsn = "NOT.EXIST.DATA"
+    
+    with open(filename, "w", encoding='utf-8') as f:
+        f.write(jcl)
+    
+    try:
+        parser = Jcl.JCLParser(filename)
+        resolver = Jcl.AttributeResolver([{'dataset': target_dsn, 'recfm_val': '', 'lrecl_val': '', 'blksize_val': '', 'needs_process': True}])
+        result, status = resolver.resolve(target_dsn, parser)
+        
+        if result is None:
+            print(f"  返回 None: ✅ 符合预期")
+            print(f"  错误信息: {status}")
+            print(f"\n  🟢 通过")
+            return True
+        else:
+            print(f"  返回了结果: ❌ 不符合预期")
+            print(f"\n  🔴 失败")
+            return False
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
+
+
+def test_special_chars_dsn():
+    """测试 9: DSN 包含特殊字符 (# @ $)"""
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//STEP01   EXEC PGM=WRITER
+//OUTFILE  DD DSN=SYS1.$PROD#DATA@SET,DISP=(NEW,CATLG)
+    """
+    return run_test(
+        "特殊字符 DSN",
+        jcl,
+        "SYS1.$PROD#DATA@SET",
+        expected_z="本JCL创建",
+        expected_status="完成(创建)",
+        expected_step="STEP01"
+    )
+
+
+def test_multi_new_same_dsn():
+    """测试 10: 同一 DSN 在多个 STEP 中都有 NEW (应取第一个)"""
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//STEP01   EXEC PGM=PROG1
+//OUTFILE  DD DSN=MY.DATA,DISP=(NEW,CATLG)
+//*
+//STEP02   EXEC PGM=PROG2
+//OUTFILE  DD DSN=MY.DATA,DISP=(NEW,CATLG)
+    """
+    return run_test(
+        "多个 NEW 同一 DSN",
+        jcl,
+        "MY.DATA",
+        expected_z="本JCL创建",
+        expected_status="完成(创建)",
+        expected_step="STEP01"  # 应该返回第一个
+    )
+
+
+def test_continuation_line():
+    """测试 11: JCL 续行 (DD 参数跨多行)"""
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//STEP01   EXEC PGM=SORT
+//SORTIN   DD DSN=INPUT.DATA,DISP=SHR
+//SORTOUT  DD DSN=OUTPUT.DATA,
+//            DISP=(NEW,CATLG,DELETE),
+//            UNIT=SYSDA,
+//            SPACE=(CYL,(1,1)),
+//            DCB=(RECFM=FB,LRECL=80,BLKSIZE=800)
+    """
+    return run_test(
+        "JCL 续行解析",
+        jcl,
+        "OUTPUT.DATA",
+        expected_z="显式定义",
+        expected_status="完成(显式)",
+        expected_step="STEP01"
+    )
+
+
+def test_iebgener_program():
+    """测试 12: IEBGENER 程序 (SYSUT2 作为输出)"""
+    print(f"\n{'='*60}")
+    print(f"测试: IEBGENER 程序")
+    print(f"{'='*60}")
+    
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//STEP01   EXEC PGM=IEBGENER
+//SYSUT1   DD DSN=INPUT.DATA,DISP=SHR
+//SYSUT2   DD DSN=OUTPUT.DATA,DISP=(NEW,CATLG)
+//SYSPRINT DD SYSOUT=*
+//SYSIN    DD DUMMY
+    """
+    filename = "temp_test_iebgener.jcl"
+    target_dsn = "OUTPUT.DATA"
+    
+    with open(filename, "w", encoding='utf-8') as f:
+        f.write(jcl)
+    
+    try:
+        parser = Jcl.JCLParser(filename)
+        
+        # mock 数据包含输入 DSN
+        mock_group_rows = [
+            {'dataset': 'OUTPUT.DATA', 'recfm_val': '', 'lrecl_val': '', 'blksize_val': '', 'needs_process': True},
+            {'dataset': 'INPUT.DATA', 'recfm_val': 'FB', 'lrecl_val': '80', 'blksize_val': '800', 'needs_process': False}
+        ]
+        
+        resolver = Jcl.AttributeResolver(mock_group_rows)
+        result, status = resolver.resolve(target_dsn, parser)
+        
+        if result:
+            z_val = result.get("Z", "")
+            status_val = result.get("STATUS", "")
+            
+            print(f"  目标 DSN: {target_dsn}")
+            print(f"  Z 列: {z_val} (期望: INPUT.DATA)")
+            print(f"  状态: {status_val} (期望: 完成(继承))")
+            
+            # IEBGENER 的 SYSUT2 应该继承 SYSUT1 的属性
+            if z_val == "INPUT.DATA" and status_val == "完成(继承)":
+                print(f"\n  🟢 通过")
+                return True
+            else:
+                print(f"\n  🔴 失败")
+                return False
+        else:
+            print(f"  ❌ 未找到匹配: {status}")
+            return False
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
+
+
+def test_no_disp_param():
+    """测试 13: DD 语句没有 DISP 参数"""
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//STEP01   EXEC PGM=PROG1
+//INFILE   DD DSN=NO.DISP.DATA,UNIT=SYSDA
+    """
+    return run_test(
+        "无 DISP 参数",
+        jcl,
+        "NO.DISP.DATA",
+        expected_z="外部数据集",  # 没有 DISP 时 DISP 为 None，走外部数据集逻辑
+        expected_status="完成(外部)",
+        expected_step="STEP01"
+    )
+
+
+def test_mixed_case_keywords():
+    """测试 14: 大小写混合的关键字"""
+    jcl = """
+//JOB1     JOB (123),'TEST'
+//Step01   Exec Pgm=SORT
+//SortIn   DD Dsn=INPUT.DATA,Disp=Shr
+//SortOut  DD Dsn=OUTPUT.DATA,Disp=(New,Catlg),
+//            DCB=(Recfm=FB,Lrecl=80,Blksize=800)
+    """
+    return run_test(
+        "大小写混合",
+        jcl,
+        "OUTPUT.DATA",
+        expected_z="显式定义",
+        expected_status="完成(显式)",
+        expected_step="Step01"
+    )
+
 
 def main():
     print("="*60)
@@ -311,28 +530,50 @@ def main():
     print("="*60)
     
     tests = [
-        test_sort_explicit,
-        test_sort_inherit,
-        test_new_creator,
-        test_external_dataset,
-        test_disp_complex_format,
-        test_disp_parsing,
+        # 正常场景
+        ("正常场景", [
+            test_sort_explicit,
+            test_sort_inherit,
+            test_new_creator,
+            test_external_dataset,
+            test_disp_complex_format,
+            test_disp_parsing,
+        ]),
+        # 边界情况
+        ("边界情况", [
+            test_empty_jcl,
+            test_dsn_not_found,
+            test_special_chars_dsn,
+            test_multi_new_same_dsn,
+            test_continuation_line,
+            test_iebgener_program,
+            test_no_disp_param,
+            test_mixed_case_keywords,
+        ]),
     ]
     
-    results = []
-    for test in tests:
-        try:
-            results.append(test())
-        except Exception as e:
-            print(f"\n  💥 异常: {e}")
-            results.append(False)
+    all_results = []
+    
+    for category, test_list in tests:
+        print(f"\n{'#'*60}")
+        print(f"# {category}")
+        print(f"{'#'*60}")
+        
+        for test in test_list:
+            try:
+                all_results.append(test())
+            except Exception as e:
+                print(f"\n  💥 异常: {e}")
+                import traceback
+                traceback.print_exc()
+                all_results.append(False)
     
     # 汇总
     print(f"\n{'='*60}")
     print("测试汇总")
     print(f"{'='*60}")
-    passed = sum(results)
-    total = len(results)
+    passed = sum(all_results)
+    total = len(all_results)
     print(f"  通过: {passed}/{total}")
     
     if passed == total:
