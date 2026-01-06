@@ -669,20 +669,45 @@ def main():
                 print(f"\n处理进度: {start_idx + 1} ~ {end_idx} / {total}")
                 batch_start = time.time()
                 
-                for i, item in enumerate(current_batch):
-                    row_num = item["row"]
-                    
-                    # 写入物理属性 (Z~AC 列)
-                    ws.range((row_num, COL_OUT_SOURCE)).value = item["vals_attr"]
-                    
-                    # 写入元数据 (AF~AJ 列)
-                    ws.range((row_num, COL_OUT_STATUS)).value = item["vals_meta"]
-                    
-                    if i % 50 == 0:
-                        print(f"\r  进度: {i}/{len(current_batch)}", end="")
+                # === 批量写入优化 ===
+                # 按行号排序，找出连续区间
+                sorted_batch = sorted(current_batch, key=lambda x: x["row"])
+                
+                # 准备批量数据
+                attr_data = []  # 物理属性 (Z~AC 列, 4列)
+                meta_data = []  # 元数据 (AF~AJ 列, 5列)
+                row_numbers = []
+                
+                for item in sorted_batch:
+                    row_numbers.append(item["row"])
+                    attr_data.append(item["vals_attr"])
+                    meta_data.append(item["vals_meta"])
+                
+                # 分组写入连续行
+                if row_numbers:
+                    # 找出连续区间并批量写入
+                    i = 0
+                    while i < len(row_numbers):
+                        # 找连续区间
+                        j = i
+                        while j + 1 < len(row_numbers) and row_numbers[j + 1] == row_numbers[j] + 1:
+                            j += 1
+                        
+                        # 批量写入连续区间 [i, j]
+                        start_row = row_numbers[i]
+                        batch_attr = attr_data[i:j+1]
+                        batch_meta = meta_data[i:j+1]
+                        
+                        # 一次写入多行 (物理属性)
+                        ws.range((start_row, COL_OUT_SOURCE), (start_row + len(batch_attr) - 1, COL_OUT_SOURCE + 3)).value = batch_attr
+                        
+                        # 一次写入多行 (元数据)
+                        ws.range((start_row, COL_OUT_STATUS), (start_row + len(batch_meta) - 1, COL_OUT_STATUS + 4)).value = batch_meta
+                        
+                        i = j + 1
                 
                 batch_time = time.time() - batch_start
-                print(f"\n  本批耗时: {batch_time:.2f} 秒")
+                print(f"  本批耗时: {batch_time:.2f} 秒")
                 wb.save()
                 
                 # 分批确认 (可选)
