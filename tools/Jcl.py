@@ -366,13 +366,17 @@ class JCLParser:
         支持格式:
         - DISP=SHR
         - DISP=(NEW,CATLG,DELETE)
-        - DISP=(,CATLG)
+        - DISP=(,CATLG)  -> 省略第一个参数时，JCL 语法默认为 NEW
         
         Returns:
             NEW/OLD/SHR/MOD 或 None
         """
+        # 先检查是否是省略第一个参数的情况: DISP=(,xxx)
+        if re.search(r'DISP=\(\s*,', line, re.IGNORECASE):
+            return "NEW"  # JCL 语法: 省略第一个参数默认为 NEW
+        
         # 匹配 DISP=xxx 或 DISP=(xxx,...)
-        match = re.search(r'DISP=\(?([A-Z]*)', line, re.IGNORECASE)
+        match = re.search(r'DISP=\(?([A-Z]+)', line, re.IGNORECASE)
         if match:
             disp_val = match.group(1).upper()
             if disp_val in ('NEW', 'OLD', 'SHR', 'MOD'):
@@ -589,7 +593,8 @@ def main():
                 "blksize_val": row[COL_BLKSIZE - 1],
                 "needs_process": needs_process
             })
-        except Exception:
+        except Exception as e:
+            logger.warning(f"第 {row_counter + DATA_START_ROW - 1} 行解析失败: {e}")
             continue
     
     wb_reader.close()
@@ -663,7 +668,8 @@ def main():
             
             try:
                 ws = wb.sheets[TARGET_SHEET_NAME]
-            except:
+            except KeyError:
+                logger.warning(f"找不到工作表 '{TARGET_SHEET_NAME}'，使用第一个工作表")
                 ws = wb.sheets[0]
 
             for start_idx in range(0, total, BATCH_SIZE):
@@ -733,10 +739,20 @@ def main():
             traceback.print_exc()
         
         finally:
+            # 各自独立清理，确保资源释放
             try:
                 app.calculation = 'automatic'
+            except:
+                pass
+            try:
                 app.screen_updating = True
+            except:
+                pass
+            try:
                 wb.close()
+            except:
+                pass
+            try:
                 app.quit()
             except:
                 pass
