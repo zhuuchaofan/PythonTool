@@ -343,8 +343,14 @@ class JCLParser:
                     self.steps[current_step_name]["DDS"].append(attrs)
 
     def _extract_param(self, line: str, key: str) -> str:
-        """从 JCL 语句中提取指定参数的值。"""
-        match = re.search(f"{key}=([\\w\\.\\$#@\\(\\)]+)", line, re.IGNORECASE)
+        """从 JCL 语句中提取指定参数的值。
+        
+        支持的 DSN 格式:
+        - 普通数据集: MY.DATA.SET
+        - 临时数据集: &&TEMP
+        - 特殊字符: $#@
+        """
+        match = re.search(f"{key}=([\\w\\.\\$#@\\(\\)&]+)", line, re.IGNORECASE)
         if match:
             # 去除括号
             return match.group(1).replace('(', '').replace(')', '')
@@ -371,7 +377,7 @@ class JCLParser:
         return None
 
 
-# ==================== 血缘推理引擎 ====================
+# ==================== 属性追溯引擎 ====================
 
 class AttributeResolver:
     """
@@ -384,10 +390,10 @@ class AttributeResolver:
     """
     
     # 常见的 SORT 类程序
-    SORT_PROGRAMS = {'SORT', 'ICEMAN', 'DFSORT', 'SYNCSORT', 'IEBGENER', 'ICEGENER'}
+    SORT_PROGRAMS = {'SORT', 'KQCAMS', 'JEDGENER'}
     
     def __init__(self, group_rows: list):
-        # 建立 DSN -> Excel行数据 的映射，用于血缘继承
+        # 建立 DSN -> Excel行数据 的映射，用于属性继承
         self.dsn_map = {r['dataset']: r for r in group_rows if r['dataset']}
     
     def resolve(self, target_dsn: str, jcl_parser: JCLParser) -> tuple:
@@ -586,7 +592,7 @@ def main():
     wb_reader.close()
     logger.info(f"  扫描完成: 共 {row_counter:,} 行, {len(groups):,} 个 JCL 分组")
 
-    # ========== 阶段 2: 解析 JCL 并推导血缘 ==========
+    # ========== 阶段 2: 解析 JCL 并追溯属性 ==========
     logger.info("[阶段 2/3] 解析 JCL 并补全属性")
     
     updates_buffer = []
