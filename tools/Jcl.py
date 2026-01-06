@@ -239,7 +239,7 @@ class JCLParser:
     
     解析 JCL 文件中的:
     - STEP (作业步骤): 每个 EXEC PGM=xxx 语句
-    - DD (数据定义): 每个 DD 语句中的 DSN、RECFM、LRECL、BLKSIZE
+    - DD (数据定义): 每个 DD 语句中的 DSN、DISP、RECFM、LRECL、BLKSIZE
     """
     
     def __init__(self, filepath: str):
@@ -335,6 +335,7 @@ class JCLParser:
                     attrs = {
                         "DD": dd_name,
                         "DSN": dsn,
+                        "DISP": self._extract_disp(line),
                         "RECFM": self._extract_param(line, "RECFM"),
                         "LRECL": self._extract_param(line, "LRECL"),
                         "BLKSIZE": self._extract_param(line, "BLKSIZE")
@@ -347,6 +348,26 @@ class JCLParser:
         if match:
             # 去除括号
             return match.group(1).replace('(', '').replace(')', '')
+        return None
+    
+    def _extract_disp(self, line: str) -> str:
+        """
+        从 JCL 语句中提取 DISP 参数。
+        
+        支持格式:
+        - DISP=SHR
+        - DISP=(NEW,CATLG,DELETE)
+        - DISP=(,CATLG)
+        
+        Returns:
+            NEW/OLD/SHR/MOD 或 None
+        """
+        # 匹配 DISP=xxx 或 DISP=(xxx,...)
+        match = re.search(r'DISP=\(?([A-Z]*)', line, re.IGNORECASE)
+        if match:
+            disp_val = match.group(1).upper()
+            if disp_val in ('NEW', 'OLD', 'SHR', 'MOD'):
+                return disp_val
         return None
 
 
@@ -373,6 +394,12 @@ class AttributeResolver:
         """
         推导指定 Dataset 的物理属性。
         
+        匹配优先级:
+        1. SORT 程序输出 + 显式定义属性
+        2. SORT 程序输出 + 从输入继承属性
+        3. DISP=NEW 的创建者
+        4. 第一个引用 (兜底)
+        
         Args:
             target_dsn: 目标 Dataset 名称
             jcl_parser: 已解析的 JCL 对象
@@ -383,45 +410,40 @@ class AttributeResolver:
         if not jcl_parser or not jcl_parser.steps:
             return None, "JCL 中未找到有效的 STEP"
 
-        fallback_match = None  # 兜底结果
-
+        # ========== 第一遍: 收集所有匹配的 DD ==========
+        all_matches = []  # [(step_name, step_data, dd)]
+        creator_match = None  # DISP=NEW 的创建者
+        
         for step_name, step_data in jcl_parser.steps.items():
+            for dd in step_data["DDS"]:
+                if dd["DSN"] == target_dsn:
+                    all_matches.append((step_name, step_data, dd))
+                    
+                    # 记录 NEW 创建者
+                    if dd.get("DISP") == "NEW" and creator_match is None:
+                        creator_match = (step_name, step_data, dd)
+        
+        if not all_matches:
+            return None, "在 JCL 中未找到该 Dataset"
+        
+        # ========== 第二遍: 按优先级匹配 ==========
+        
+        # 优先级 1 & 2: SORT 程序输出
+        for step_name, step_data, target_dd in all_matches:
             pgm = step_data["PGM"]
             
-            # 在当前 STEP 中查找目标 DSN
-            target_dd = next(
-                (dd for dd in step_data["DDS"] if dd["DSN"] == target_dsn), 
-                None
-            )
-            
-            if not target_dd:
-                continue
-
-            # 元数据 (无论什么情况都可以填充)
-            meta_info = {
-                "STEP": step_name,
-                "PGM": pgm,
-                "DD": target_dd["DD"]
-            }
-            
-            # 记录兜底结果 (如果没有更好的结果可用)
-            if not fallback_match:
-                fallback_match = ({
-                    "Z": "仅引用",
-                    "AA": target_dd["RECFM"],
-                    "AB": target_dd["LRECL"],
-                    "AC": target_dd["BLKSIZE"],
-                    "META": meta_info,
-                    "STATUS": "完成(引用)"
-                }, "找到引用")
-
-            # 高级逻辑: SORT 程序的输出可以继承输入的属性
             if pgm in self.SORT_PROGRAMS:
                 dd_name = target_dd["DD"]
                 is_output = dd_name.startswith("SORTOUT") or dd_name == "SYSUT2"
                 
                 if is_output:
-                    # 情况 A: DD 中已显式定义属性
+                    meta_info = {
+                        "STEP": step_name,
+                        "PGM": pgm,
+                        "DD": dd_name
+                    }
+                    
+                    # 优先级 1: DD 中已显式定义属性
                     if target_dd.get("LRECL") and target_dd.get("RECFM"):
                         return {
                             "Z": "显式定义",
@@ -432,7 +454,7 @@ class AttributeResolver:
                             "STATUS": "完成(显式)"
                         }, "显式定义"
 
-                    # 情况 B: 从输入 DD 继承属性
+                    # 优先级 2: 从输入 DD 继承属性
                     input_dds = [
                         d for d in step_data["DDS"]
                         if not (d["DD"].startswith("SORTOUT") or d["DD"] == "SYSUT2")
@@ -442,11 +464,10 @@ class AttributeResolver:
                         first_input = input_dds[0]
                         source_dsn = first_input["DSN"]
                         
-                        # 检查输入 DSN 是否在 Excel 数据中
                         if source_dsn in self.dsn_map:
                             src_row = self.dsn_map[source_dsn]
                             return {
-                                "Z": source_dsn,  # 血缘来源
+                                "Z": source_dsn,
                                 "AA": src_row['recfm_val'],
                                 "AB": src_row['lrecl_val'],
                                 "AC": src_row['blksize_val'],
@@ -454,11 +475,38 @@ class AttributeResolver:
                                 "STATUS": "完成(继承)"
                             }, "属性继承"
         
-        # 返回兜底结果
-        if fallback_match:
-            return fallback_match
-            
-        return None, "在 JCL 中未找到该 Dataset"
+        # 优先级 3: DISP=NEW 的创建者
+        if creator_match:
+            step_name, step_data, target_dd = creator_match
+            meta_info = {
+                "STEP": step_name,
+                "PGM": step_data["PGM"],
+                "DD": target_dd["DD"]
+            }
+            return {
+                "Z": "本JCL创建",
+                "AA": target_dd.get("RECFM"),
+                "AB": target_dd.get("LRECL"),
+                "AC": target_dd.get("BLKSIZE"),
+                "META": meta_info,
+                "STATUS": "完成(创建)"
+            }, "找到创建者"
+        
+        # 优先级 4: 兜底 - 第一个引用 (没有 NEW，说明是外部数据集)
+        step_name, step_data, target_dd = all_matches[0]
+        meta_info = {
+            "STEP": step_name,
+            "PGM": step_data["PGM"],
+            "DD": target_dd["DD"]
+        }
+        return {
+            "Z": "外部数据集",
+            "AA": target_dd.get("RECFM"),
+            "AB": target_dd.get("LRECL"),
+            "AC": target_dd.get("BLKSIZE"),
+            "META": meta_info,
+            "STATUS": "完成(外部)"
+        }, "外部引用"
 
 
 # ==================== 主流程 ====================
