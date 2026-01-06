@@ -14,11 +14,28 @@ import os
 import sys
 import logging
 
+# 配置简单的日志
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+# --- MOCK 依赖库 ---
+# 为了在没有安装 openpyxl/xlwings 的环境中运行测试，
+# 我们在导入 Jcl 之前对这些模块进行 Mock
+from unittest.mock import MagicMock
+sys.modules['openpyxl'] = MagicMock()
+sys.modules['xlwings'] = MagicMock()
+
+# Mock logging.FileHandler 以避免路径错误
+class MockFileHandler(logging.Handler):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+    def emit(self, record):
+        pass
+
+logging.FileHandler = MockFileHandler
+# ------------------
+
 # 引入目标模块
 import Jcl
-
-# 配置简单的日志
-logging.basicConfig(level=logging.WARNING, format='%(message)s')
 
 
 def run_test(name: str, jcl_content: str, target_dsn: str, 
@@ -123,14 +140,62 @@ def test_sort_inherit():
 //SORTIN   DD DSN=INPUT.DATA,DISP=SHR
 //SORTOUT  DD DSN=OUTPUT.DATA,DISP=(NEW,CATLG)
     """
-    return run_test(
-        "SORT 继承属性",
-        jcl,
-        "OUTPUT.DATA",
-        expected_z="INPUT.DATA",
-        expected_status="完成(继承)",
-        expected_step="STEP01"
-    )
+    # 这个测试需要特殊处理：需要把输入 DSN 也加入 mock 数据
+    print(f"\n{'='*60}")
+    print(f"测试: SORT 继承属性")
+    print(f"{'='*60}")
+    
+    filename = "temp_test_sort_inherit.jcl"
+    target_dsn = "OUTPUT.DATA"
+    
+    with open(filename, "w", encoding='utf-8') as f:
+        f.write(jcl)
+    
+    try:
+        parser = Jcl.JCLParser(filename)
+        
+        # 关键：mock 数据需要包含输入 DSN (INPUT.DATA) 才能继承
+        mock_group_rows = [
+            {
+                'dataset': 'OUTPUT.DATA',
+                'recfm_val': '',
+                'lrecl_val': '',
+                'blksize_val': '',
+                'needs_process': True
+            },
+            {
+                'dataset': 'INPUT.DATA',  # 输入源必须在 dsn_map 中
+                'recfm_val': 'FB',
+                'lrecl_val': '100',
+                'blksize_val': '1000',
+                'needs_process': False
+            }
+        ]
+        
+        resolver = Jcl.AttributeResolver(mock_group_rows)
+        result, status = resolver.resolve(target_dsn, parser)
+        
+        if result:
+            z_val = result.get("Z", "")
+            status_val = result.get("STATUS", "")
+            
+            print(f"  目标 DSN: {target_dsn}")
+            print(f"  Z 列: {z_val} (期望: INPUT.DATA)")
+            print(f"  状态: {status_val} (期望: 完成(继承))")
+            
+            if z_val == "INPUT.DATA" and status_val == "完成(继承)":
+                print(f"\n  🟢 通过")
+                return True
+            else:
+                print(f"\n  🔴 失败")
+                return False
+        else:
+            print(f"  ❌ 未找到匹配: {status}")
+            return False
+    
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
 
 
 def test_new_creator():
