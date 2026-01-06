@@ -70,6 +70,9 @@ COL_OUT_STEP = 34     # AH列: STEP 名称
 COL_OUT_PGM = 35      # AI列: 程序名
 COL_OUT_DD = 36       # AJ列: DD 名称
 
+# --- 可选输出配置 ---
+ENABLE_COL_SOURCE = True  # 是否写入 Z 列 (数据来源)，设为 False 则跳过
+
 
 # ==================== 日志配置 ====================
 
@@ -625,9 +628,9 @@ def main():
                 
                 updates_buffer.append({
                     "row": target['row_idx'],
-                    # 物理属性 (写入 Z~AC 列)
+                    # 物理属性 (写入 Z~AC 列，Z 列可选)
                     "vals_attr": [
-                        safe_val(result["Z"]),   # Z: 数据来源
+                        safe_val(result["Z"]) if ENABLE_COL_SOURCE else None,  # Z: 数据来源 (可选)
                         safe_val(result["AA"]),  # AA: RECFM
                         safe_val(result["AB"]),  # AB: LRECL
                         safe_val(result["AC"])   # AC: BLKSIZE
@@ -639,7 +642,8 @@ def main():
                         safe_val(meta.get("STEP")),     # AH: STEP 名称
                         safe_val(meta.get("PGM")),      # AI: 程序名
                         safe_val(meta.get("DD"))        # AJ: DD 名称
-                    ]
+                    ],
+                    "skip_source": not ENABLE_COL_SOURCE  # 标记是否跳过 Z 列
                 })
 
     logger.info(f"  解析完成: 共 {len(updates_buffer):,} 条待更新数据")
@@ -699,7 +703,13 @@ def main():
                         batch_meta = meta_data[i:j+1]
                         
                         # 一次写入多行 (物理属性)
-                        ws.range((start_row, COL_OUT_SOURCE), (start_row + len(batch_attr) - 1, COL_OUT_SOURCE + 3)).value = batch_attr
+                        if ENABLE_COL_SOURCE:
+                            # 写入 Z~AC 列 (4列)
+                            ws.range((start_row, COL_OUT_SOURCE), (start_row + len(batch_attr) - 1, COL_OUT_SOURCE + 3)).value = batch_attr
+                        else:
+                            # 跳过 Z 列，只写入 AA~AC 列 (3列)
+                            batch_attr_no_z = [row[1:] for row in batch_attr]  # 去掉第一个元素(Z列)
+                            ws.range((start_row, COL_OUT_RECFM), (start_row + len(batch_attr_no_z) - 1, COL_OUT_RECFM + 2)).value = batch_attr_no_z
                         
                         # 一次写入多行 (元数据)
                         ws.range((start_row, COL_OUT_STATUS), (start_row + len(batch_meta) - 1, COL_OUT_STATUS + 4)).value = batch_meta
