@@ -1,0 +1,16 @@
+# 公共依赖
+# ============
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 代码格式化 & 检查
+black>=24.0.0
+ruff>=0.1.0
+
+# 类型检查
+mypy>=1.0.0
+
+# Excel 处理
+openpyxl>=3.1.0
+xlwings>=0.30.0  # Windows Only
