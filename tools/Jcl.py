@@ -100,6 +100,106 @@ def setup_logger(log_file_path: str) -> logging.Logger:
 logger = setup_logger(LOG_PATH)
 
 
+# ==================== Excel 结构验证 ====================
+
+def validate_excel_structure(file_path: str, sheet_name: str) -> tuple:
+    """
+    验证 Excel 文件结构是否符合预期。
+    
+    检查项:
+    1. 文件是否存在
+    2. 工作表是否存在
+    3. 列数是否足够 (至少包含所有需要读取的列)
+    4. 起始行是否有数据
+    5. 关键列是否有有效数据 (抽样检查)
+    
+    Args:
+        file_path: Excel 文件路径
+        sheet_name: 工作表名称
+        
+    Returns:
+        (是否通过, 错误信息或成功信息)
+    """
+    logger.info("[预检] 验证 Excel 文件结构...")
+    
+    # 1. 文件存在性检查
+    if not os.path.exists(file_path):
+        return False, f"文件不存在: {file_path}"
+    
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+    except Exception as e:
+        return False, f"无法打开 Excel 文件: {e}"
+    
+    # 2. 工作表存在性检查
+    if sheet_name not in wb.sheetnames:
+        available = ", ".join(wb.sheetnames)
+        wb.close()
+        return False, f"找不到工作表 '{sheet_name}'，可用的工作表: {available}"
+    
+    ws = wb[sheet_name]
+    
+    # 3. 列数检查
+    required_cols = max(COL_JCL_NAME, COL_DATASET, COL_RECFM, COL_LRECL, COL_BLKSIZE)
+    output_cols = max(COL_OUT_SOURCE, COL_OUT_STATUS, COL_OUT_DD)
+    
+    # 读取第一行检查列数
+    first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    if first_row is None:
+        wb.close()
+        return False, "工作表为空"
+    
+    actual_cols = len(first_row)
+    if actual_cols < required_cols:
+        wb.close()
+        return False, f"列数不足: 需要至少 {required_cols} 列 (到 {chr(64+required_cols)} 列), 实际只有 {actual_cols} 列"
+    
+    # 4. 起始行数据检查
+    start_row_data = None
+    for row in ws.iter_rows(min_row=DATA_START_ROW, max_row=DATA_START_ROW, values_only=True):
+        start_row_data = row
+        break
+    
+    if start_row_data is None:
+        wb.close()
+        return False, f"起始行 {DATA_START_ROW} 没有数据，请检查 DATA_START_ROW 配置"
+    
+    # 5. 关键列数据抽样检查 (检查前 100 行)
+    sample_count = 0
+    valid_jcl_count = 0
+    valid_dataset_count = 0
+    
+    for row in ws.iter_rows(min_row=DATA_START_ROW, max_row=DATA_START_ROW + 99, values_only=True):
+        sample_count += 1
+        if len(row) >= required_cols:
+            if row[COL_JCL_NAME - 1]:
+                valid_jcl_count += 1
+            if row[COL_DATASET - 1]:
+                valid_dataset_count += 1
+    
+    wb.close()
+    
+    if sample_count == 0:
+        return False, f"从第 {DATA_START_ROW} 行开始没有数据"
+    
+    if valid_jcl_count == 0:
+        return False, f"抽样 {sample_count} 行中，C 列 (JCL名) 全部为空，请检查列配置"
+    
+    if valid_dataset_count == 0:
+        return False, f"抽样 {sample_count} 行中，G 列 (Dataset) 全部为空，请检查列配置"
+    
+    # 验证通过
+    summary = (
+        f"验证通过:\n"
+        f"  - 工作表: {sheet_name}\n"
+        f"  - 总列数: {actual_cols} (需要读取到第 {required_cols} 列, 写入到第 {output_cols} 列)\n"
+        f"  - 起始行: {DATA_START_ROW}\n"
+        f"  - 抽样 {sample_count} 行: JCL名有效 {valid_jcl_count} 行, Dataset有效 {valid_dataset_count} 行"
+    )
+    
+    return True, summary
+
+
 # ==================== JCL 文件索引 ====================
 
 def build_filename_index(root_dir: str) -> dict:
@@ -369,13 +469,19 @@ def main():
     logger.info(f"========== 任务开始 ==========")
     logger.info(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # 检查源文件
-    if not os.path.exists(SOURCE_PATH):
-        logger.error(f"找不到源文件: {SOURCE_PATH}")
+    # ========== 预检: 验证 Excel 结构 ==========
+    is_valid, message = validate_excel_structure(SOURCE_PATH, TARGET_SHEET_NAME)
+    if not is_valid:
+        logger.error(f"[预检失败] {message}")
         return
+    logger.info(message)
     
     # 建立 JCL 文件索引
     jcl_path_map = build_filename_index(JCL_DIR)
+    
+    if not jcl_path_map:
+        logger.error("JCL 目录为空或不存在，请检查 JCL_DIR 配置")
+        return
     
     # 复制源文件作为输出文件
     logger.info(f"复制文件: {SOURCE_FILE_NAME} -> {OUTPUT_FILE_NAME}")
