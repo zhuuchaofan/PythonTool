@@ -1,3 +1,18 @@
+"""
+JCL 数据属性解析工具
+
+功能说明:
+    从 Excel 文件中读取 Dataset (数据集) 信息，
+    通过解析对应的 JCL 文件，自动补全数据的物理属性 (RECFM/LRECL/BLKSIZE)，
+    并追溯数据来源，将结果回填到 Excel 中。
+
+适用场景:
+    Mainframe 环境下的数据资产梳理。
+
+运行环境:
+    Windows (需要 Excel 和 xlwings)
+"""
+
 import os
 import re
 import shutil
@@ -8,91 +23,151 @@ from collections import defaultdict
 from datetime import datetime
 import xlwings as xw
 
-# ================= ⚙️ 配置区域 =================
-BASE_DIR = r"C:\Users\zhu-chaofan\Downloads"
-JCL_DIR = os.path.join(BASE_DIR, r"JCL\JCL")  # JCL 根目录
 
+# ==================== 配置区域 ====================
+# 请根据实际情况修改以下路径和参数
+
+# 基础目录
+BASE_DIR = r"C:\Users\zhu-chaofan\Downloads"
+
+# JCL 文件所在根目录
+JCL_DIR = os.path.join(BASE_DIR, r"JCL\JCL")
+
+# 输入/输出文件名
 SOURCE_FILE_NAME = "DSN_Final.xlsx"
 OUTPUT_FILE_NAME = f"AssetList_Lineage_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 LOG_FILE_NAME = f"Process_Log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
+# 完整路径
 SOURCE_PATH = os.path.join(BASE_DIR, SOURCE_FILE_NAME)
 TARGET_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
 LOG_PATH = os.path.join(BASE_DIR, LOG_FILE_NAME)
 
-# 🔥 核心配置：请确保 Excel 里真的有这个名字的 Sheet
+# Excel 工作表名称
 TARGET_SHEET_NAME = "Sheet2"
 
-# 批处理大小
+# 每批处理的数据量
 BATCH_SIZE = 1000
 
-# --- Excel 读取列 definition (1-based) ---
-COL_JCL_NAME = 3   # C列: JCL名
-COL_DATASET = 7    # G列: Dataset名
-COL_RECFM = 12     # L列: RECFM (用于判断是否需要处理)
-COL_LRECL = 13     # M列
-COL_BLKSIZE = 14   # N列
+# Excel 列定义 (1 表示 A 列, 2 表示 B 列, 以此类推)
+COL_JCL_NAME = 3   # C列: JCL 文件名
+COL_DATASET = 7    # G列: Dataset 名称
+COL_RECFM = 12     # L列: 记录格式 (RECFM)
+COL_LRECL = 13     # M列: 记录长度 (LRECL)
+COL_BLKSIZE = 14   # N列: 块大小 (BLKSIZE)
 
-# ================= 📝 日志模块 =================
-def setup_logger(log_file_path):
-    logger = logging.getLogger("Processor")
+
+# ==================== 日志配置 ====================
+
+def setup_logger(log_file_path: str) -> logging.Logger:
+    """初始化日志记录器，同时输出到文件和控制台。"""
+    logger = logging.getLogger("JCL_Processor")
     logger.setLevel(logging.INFO)
-    if logger.handlers: logger.handlers.clear()
     
-    fh = logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
-    fh.setFormatter(logging.Formatter('%(message)s'))
-    logger.addHandler(fh)
+    # 清除已有的处理器
+    if logger.handlers:
+        logger.handlers.clear()
     
-    ch = logging.StreamHandler()
-    ch.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
-    logger.addHandler(ch)
+    # 文件日志 (详细记录)
+    file_handler = logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(file_handler)
+    
+    # 控制台日志 (带时间戳)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S')
+    )
+    logger.addHandler(console_handler)
+    
     return logger
+
 
 logger = setup_logger(LOG_PATH)
 
-# ================= 🔍 辅助模块: 建立文件索引 =================
-def build_filename_index(root_dir):
-    """递归遍历目录，建立 {文件名(无后缀): 绝对路径} 映射"""
-    logger.info(f"🕵️‍♂️ 正在建立文件索引 (扫描目录: {root_dir})...")
+
+# ==================== JCL 文件索引 ====================
+
+def build_filename_index(root_dir: str) -> dict:
+    """
+    扫描目录，建立 JCL 文件名到路径的映射。
+    
+    Args:
+        root_dir: JCL 文件根目录
+        
+    Returns:
+        字典 {文件名(不含扩展名): 完整路径}
+    """
+    logger.info(f"正在扫描 JCL 目录: {root_dir}")
+    
     file_map = {}
-    count = 0
+    file_count = 0
+    
     for root, dirs, files in os.walk(root_dir):
         for file in files:
-            name_no_ext = os.path.splitext(file)[0]
+            name_without_ext = os.path.splitext(file)[0]
             full_path = os.path.join(root, file)
-            if name_no_ext not in file_map:
-                file_map[name_no_ext] = full_path
-            count += 1
-    logger.info(f"✅ 索引构建完成。扫描文件总数: {count}")
+            
+            # 同名文件只保留第一个
+            if name_without_ext not in file_map:
+                file_map[name_without_ext] = full_path
+            file_count += 1
+    
+    logger.info(f"扫描完成: 共发现 {file_count} 个文件, 建立 {len(file_map)} 个索引")
     return file_map
 
-# ================= 🧩 JCL 解析器 (全量捕捉) =================
+
+# ==================== JCL 解析器 ====================
+
 class JCLParser:
-    def __init__(self, filepath):
+    """
+    JCL 文件解析器。
+    
+    解析 JCL 文件中的:
+    - STEP (作业步骤): 每个 EXEC PGM=xxx 语句
+    - DD (数据定义): 每个 DD 语句中的 DSN、RECFM、LRECL、BLKSIZE
+    """
+    
+    def __init__(self, filepath: str):
         self.filepath = filepath
-        # 结构: { "STEP名": { "PGM": "XXX", "DDS": [ {name, dsn, ...} ] } }
-        self.steps = {} 
+        self.steps = {}  # 结构: {"步骤名": {"PGM": "程序名", "DDS": [...]}}
         self._load_and_parse()
 
     def _load_and_parse(self):
+        """加载并解析 JCL 文件。"""
         try:
             with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 raw_content = f.read()
+            
+            # 预处理: 合并续行
             normalized_lines = self._normalize_jcl(raw_content)
+            # 解析语句
             self._parse_lines(normalized_lines)
+            
         except Exception as e:
-            logger.error(f"❌ 读取 JCL 失败: {os.path.basename(self.filepath)} - {e}")
+            logger.error(f"读取 JCL 文件失败: {os.path.basename(self.filepath)} - {e}")
 
-    def _normalize_jcl(self, content):
-        """清洗 JCL，处理断行拼接"""
+    def _normalize_jcl(self, content: str) -> list:
+        """
+        预处理 JCL 内容:
+        1. 去除注释行 (//*开头)
+        2. 合并续行 (以逗号结尾的行与下一行合并)
+        """
         lines = content.split('\n')
         cleaned_lines = []
         buffer = ""
+        
         for line in lines:
             line = line.strip()
-            if not line or line.startswith('//*') or not line.startswith('//'): continue
+            
+            # 跳过空行、注释行、非 JCL 语句
+            if not line or line.startswith('//*') or not line.startswith('//'):
+                continue
+            
+            # 处理续行 (以逗号结尾)
             if line.endswith(','):
                 if buffer:
+                    # 去除续行开头的 //
                     clean_segment = re.sub(r'^//\s*', '', line)
                     buffer += clean_segment
                 else:
@@ -104,20 +179,22 @@ class JCLParser:
                     buffer = ""
                 else:
                     cleaned_lines.append(line)
+        
         return cleaned_lines
 
-    def _parse_lines(self, lines):
+    def _parse_lines(self, lines: list):
         """
-        识别所有 STEP 和 DD。
-        不再过滤非 SORT 程序，只要是 STEP 都记录。
+        解析 JCL 语句，提取 STEP 和 DD 信息。
         """
         current_step_name = None
         
+        # 正则: 匹配 EXEC PGM=xxx
         re_step = re.compile(r'^//(\S+)\s+EXEC\s+PGM=([A-Z0-9#@$]+)', re.IGNORECASE)
+        # 正则: 匹配 DD 语句
         re_dd = re.compile(r'^//(\S+)\s+DD\s+', re.IGNORECASE)
 
         for line in lines:
-            # 1. STEP 识别
+            # 识别 STEP (EXEC PGM=xxx)
             step_match = re_step.search(line)
             if step_match:
                 step_name = step_match.group(1)
@@ -130,13 +207,16 @@ class JCLParser:
                 }
                 continue
 
-            # 2. DD 识别 (只要在 Step 内都抓)
+            # 识别 DD 语句 (必须在某个 STEP 内)
             if current_step_name:
                 dd_match = re_dd.search(line)
                 if dd_match:
                     dd_name = dd_match.group(1).upper()
                     dsn = self._extract_param(line, "DSN")
-                    if not dsn: continue
+                    
+                    # 没有 DSN 的 DD 跳过
+                    if not dsn:
+                        continue
                     
                     attrs = {
                         "DD": dd_name,
@@ -147,192 +227,254 @@ class JCLParser:
                     }
                     self.steps[current_step_name]["DDS"].append(attrs)
 
-    def _extract_param(self, line, key):
+    def _extract_param(self, line: str, key: str) -> str:
+        """从 JCL 语句中提取指定参数的值。"""
         match = re.search(f"{key}=([\\w\\.\\$#@\\(\\)]+)", line, re.IGNORECASE)
-        if match: return match.group(1).replace('(', '').replace(')', '')
+        if match:
+            # 去除括号
+            return match.group(1).replace('(', '').replace(')', '')
         return None
 
-# ================= 🧠 业务推理机 (分级策略) =================
+
+# ==================== 血缘推理引擎 ====================
+
 class AttributeResolver:
-    def __init__(self, group_rows):
-        self.dsn_map = {r['dataset']: r for r in group_rows if r['dataset']}
-        self.SORT_PGM_LIST = {'SORT', 'ICEMAN', 'DFSORT', 'SYNCSORT', 'IEBGENER', 'ICEGENER'}
+    """
+    数据属性推理器。
     
-    def resolve(self, target_dsn, jcl_parser):
-        if not jcl_parser or not jcl_parser.steps: 
-            return None, "No Steps found"
+    根据 JCL 中的信息推导 Dataset 的物理属性:
+    1. 如果 DD 中显式定义了属性，直接使用
+    2. 如果是 SORT 程序的输出，尝试从输入继承属性
+    3. 否则记录为"仅引用"
+    """
+    
+    # 常见的 SORT 类程序
+    SORT_PROGRAMS = {'SORT', 'ICEMAN', 'DFSORT', 'SYNCSORT', 'IEBGENER', 'ICEGENER'}
+    
+    def __init__(self, group_rows: list):
+        # 建立 DSN -> Excel行数据 的映射，用于血缘继承
+        self.dsn_map = {r['dataset']: r for r in group_rows if r['dataset']}
+    
+    def resolve(self, target_dsn: str, jcl_parser: JCLParser) -> tuple:
+        """
+        推导指定 Dataset 的物理属性。
+        
+        Args:
+            target_dsn: 目标 Dataset 名称
+            jcl_parser: 已解析的 JCL 对象
+            
+        Returns:
+            (结果字典, 状态描述) 或 (None, 错误描述)
+        """
+        if not jcl_parser or not jcl_parser.steps:
+            return None, "JCL 中未找到有效的 STEP"
 
-        fallback_match = None # 兜底方案 (非SORT，或找不到血缘的引用)
+        fallback_match = None  # 兜底结果
 
-        # 遍历所有 Step
         for step_name, step_data in jcl_parser.steps.items():
             pgm = step_data["PGM"]
             
-            # 在当前 Step 找目标 DSN
-            # (如果一个 Step 有多个同名 DSN，这里取第一个)
-            target_dd = next((dd for dd in step_data["DDS"] if dd["DSN"] == target_dsn), None)
+            # 在当前 STEP 中查找目标 DSN
+            target_dd = next(
+                (dd for dd in step_data["DDS"] if dd["DSN"] == target_dsn), 
+                None
+            )
             
-            if not target_dd: continue
+            if not target_dd:
+                continue
 
-            # === 基础元数据 (只要找到了，就能填 AG~AJ) ===
+            # 元数据 (无论什么情况都可以填充)
             meta_info = {
                 "STEP": step_name,
                 "PGM": pgm,
                 "DD": target_dd["DD"]
             }
             
-            # 策略：先记录一个“兜底结果”。
-            # 如果后面也没发现这是个 SORT 输出，就返回这个结果。
+            # 记录兜底结果 (如果没有更好的结果可用)
             if not fallback_match:
                 fallback_match = ({
-                    "Z": "N/A (Ref Only)",    # Z: 仅引用，无血缘
-                    "AA": target_dd["RECFM"], # AA: 也许 JCL 里写了
-                    "AB": target_dd["LRECL"], # AB
-                    "AC": target_dd["BLKSIZE"], # AC
+                    "Z": "仅引用",
+                    "AA": target_dd["RECFM"],
+                    "AB": target_dd["LRECL"],
+                    "AC": target_dd["BLKSIZE"],
                     "META": meta_info,
-                    "STATUS": "Done (Ref)"    # AF: 状态
-                }, "Reference Found")
+                    "STATUS": "完成(引用)"
+                }, "找到引用")
 
-            # === 高级逻辑: 只有 SORT 程序才尝试推导血缘 ===
-            if pgm in self.SORT_PGM_LIST:
+            # 高级逻辑: SORT 程序的输出可以继承输入的属性
+            if pgm in self.SORT_PROGRAMS:
                 dd_name = target_dd["DD"]
                 is_output = dd_name.startswith("SORTOUT") or dd_name == "SYSUT2"
                 
                 if is_output:
-                    # Logic A: 显式定义 (最高优先级之一)
+                    # 情况 A: DD 中已显式定义属性
                     if target_dd.get("LRECL") and target_dd.get("RECFM"):
-                         return {
-                            "Z": "N/A (Explicit)",
+                        return {
+                            "Z": "显式定义",
                             "AA": target_dd["RECFM"],
                             "AB": target_dd["LRECL"],
                             "AC": target_dd.get("BLKSIZE", ""),
                             "META": meta_info,
-                            "STATUS": "Done (Explicit)"
-                        }, "Sort Explicit"
+                            "STATUS": "完成(显式)"
+                        }, "显式定义"
 
-                    # Logic B: 继承自输入 (最高优先级之二)
-                    input_candidates = [d for d in step_data["DDS"] 
-                                        if not (d["DD"].startswith("SORTOUT") or d["DD"] == "SYSUT2")]
+                    # 情况 B: 从输入 DD 继承属性
+                    input_dds = [
+                        d for d in step_data["DDS"]
+                        if not (d["DD"].startswith("SORTOUT") or d["DD"] == "SYSUT2")
+                    ]
                     
-                    if input_candidates:
-                        first_input = input_candidates[0]
+                    if input_dds:
+                        first_input = input_dds[0]
                         source_dsn = first_input["DSN"]
                         
+                        # 检查输入 DSN 是否在 Excel 数据中
                         if source_dsn in self.dsn_map:
                             src_row = self.dsn_map[source_dsn]
                             return {
-                                "Z": source_dsn, 
+                                "Z": source_dsn,  # 血缘来源
                                 "AA": src_row['recfm_val'],
                                 "AB": src_row['lrecl_val'],
                                 "AC": src_row['blksize_val'],
                                 "META": meta_info,
-                                "STATUS": "Done (Inherited)"
-                            }, "Sort Inherited"
+                                "STATUS": "完成(继承)"
+                            }, "属性继承"
         
-        # 循环结束，如果没找到“高级血缘”，但找到了“普通引用”，返回兜底
+        # 返回兜底结果
         if fallback_match:
             return fallback_match
             
-        return None, "Not found in JCL"
+        return None, "在 JCL 中未找到该 Dataset"
 
-# ================= 🚀 主流程 =================
+
+# ==================== 主流程 ====================
+
 def main():
+    """主入口函数。"""
     start_time = time.time()
-    logger.info(f"🚀 任务启动 | {datetime.now()}")
+    logger.info(f"========== 任务开始 ==========")
+    logger.info(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # 检查源文件
     if not os.path.exists(SOURCE_PATH):
-        logger.error(f"❌ 找不到源文件: {SOURCE_PATH}"); return
+        logger.error(f"找不到源文件: {SOURCE_PATH}")
+        return
     
+    # 建立 JCL 文件索引
     jcl_path_map = build_filename_index(JCL_DIR)
     
-    logger.info(f"📂 复制文件: {SOURCE_FILE_NAME} -> {OUTPUT_FILE_NAME}")
+    # 复制源文件作为输出文件
+    logger.info(f"复制文件: {SOURCE_FILE_NAME} -> {OUTPUT_FILE_NAME}")
     shutil.copy2(SOURCE_PATH, TARGET_PATH)
 
-    # --- Phase 1: 读取 Excel ---
-    logger.info(f"👀 [Phase 1] 读取数据 (Sheet: {TARGET_SHEET_NAME})...")
+    # ========== 阶段 1: 读取 Excel ==========
+    logger.info(f"[阶段 1/3] 读取 Excel 数据 (工作表: {TARGET_SHEET_NAME})")
+    
     wb_reader = openpyxl.load_workbook(TARGET_PATH, data_only=True, read_only=True)
+    
     try:
         ws_reader = wb_reader[TARGET_SHEET_NAME]
     except KeyError:
-        logger.error(f"❌ Excel 中找不到名为 '{TARGET_SHEET_NAME}' 的 Sheet！"); return
+        logger.error(f"找不到工作表: {TARGET_SHEET_NAME}")
+        return
 
+    # 按 JCL 文件名分组
     groups = defaultdict(list)
     row_counter = 0
-    beginRow = 108415  # 数据从第108415行开始
+    begin_row = 108415  # 数据起始行
 
-    for row in ws_reader.iter_rows(min_row=beginRow, values_only=True):
+    for row in ws_reader.iter_rows(min_row=begin_row, values_only=True):
         row_counter += 1
-        if row_counter % 50000 == 0: logger.info(f"   ...已扫描 {row_counter} 行")
+        
+        if row_counter % 50000 == 0:
+            logger.info(f"  已扫描 {row_counter:,} 行...")
+        
         try:
-            if len(row) < max(COL_JCL_NAME, COL_DATASET, COL_RECFM): continue
-            jcl = row[COL_JCL_NAME-1]
-            if not jcl: continue
+            if len(row) < max(COL_JCL_NAME, COL_DATASET, COL_RECFM):
+                continue
             
-            recfm_val = row[COL_RECFM-1]
-            s_recfm = str(recfm_val).strip() if recfm_val is not None else ""
-            if s_recfm.endswith(".0"): s_recfm = s_recfm[:-2]
+            jcl_name = row[COL_JCL_NAME - 1]
+            if not jcl_name:
+                continue
             
-            needs_process = (s_recfm == "0" or s_recfm == "")
+            # 检查 RECFM 是否需要处理 (为空或为0)
+            recfm_val = row[COL_RECFM - 1]
+            recfm_str = str(recfm_val).strip() if recfm_val is not None else ""
+            if recfm_str.endswith(".0"):
+                recfm_str = recfm_str[:-2]
+            
+            needs_process = (recfm_str == "0" or recfm_str == "")
 
-            groups[jcl].append({
-                "row_idx": row_counter + beginRow - 1,
-                "dataset": row[COL_DATASET-1],
-                "recfm_val": s_recfm,
-                "lrecl_val": row[COL_LRECL-1],
-                "blksize_val": row[COL_BLKSIZE-1],
+            groups[jcl_name].append({
+                "row_idx": row_counter + begin_row - 1,
+                "dataset": row[COL_DATASET - 1],
+                "recfm_val": recfm_str,
+                "lrecl_val": row[COL_LRECL - 1],
+                "blksize_val": row[COL_BLKSIZE - 1],
                 "needs_process": needs_process
             })
-        except Exception: continue
+        except Exception:
+            continue
+    
     wb_reader.close()
-    logger.info(f"✅ 扫描完成。发现 JCL 组数: {len(groups)}")
+    logger.info(f"  扫描完成: 共 {row_counter:,} 行, {len(groups):,} 个 JCL 分组")
 
-    # --- Phase 2: 计算逻辑 ---
-    logger.info("🧠 [Phase 2] 解析 JCL 并构建血缘/元数据...")
-    updates_buffer = [] 
+    # ========== 阶段 2: 解析 JCL 并推导血缘 ==========
+    logger.info("[阶段 2/3] 解析 JCL 并补全属性")
+    
+    updates_buffer = []
     jcl_cache = {}
     
     for jcl_name, rows in groups.items():
+        # 筛选需要处理的行
         target_rows = [r for r in rows if r['needs_process']]
-        if not target_rows: continue
+        if not target_rows:
+            continue
         
+        # 查找对应的 JCL 文件
         real_path = jcl_path_map.get(jcl_name)
-        if not real_path: continue
+        if not real_path:
+            continue
 
-        if jcl_name not in jcl_cache: jcl_cache[jcl_name] = JCLParser(real_path)
+        # 解析 JCL (带缓存)
+        if jcl_name not in jcl_cache:
+            jcl_cache[jcl_name] = JCLParser(real_path)
         
         parser = jcl_cache[jcl_name]
         resolver = AttributeResolver(rows)
 
         for target in target_rows:
-            res_data, status = resolver.resolve(target['dataset'], parser)
-            if res_data:
-                meta = res_data.get("META", {})
-                # 为防止 None 值写入报错，转换为 ""
+            result, status = resolver.resolve(target['dataset'], parser)
+            
+            if result:
+                meta = result.get("META", {})
                 safe_val = lambda v: v if v else ""
                 
                 updates_buffer.append({
                     "row": target['row_idx'],
-                    # Z ~ AC
+                    # 物理属性 (写入 Z~AC 列)
                     "vals_attr": [
-                        safe_val(res_data["Z"]), 
-                        safe_val(res_data["AA"]), 
-                        safe_val(res_data["AB"]), 
-                        safe_val(res_data["AC"])
+                        safe_val(result["Z"]),   # Z: 数据来源
+                        safe_val(result["AA"]),  # AA: RECFM
+                        safe_val(result["AB"]),  # AB: LRECL
+                        safe_val(result["AC"])   # AC: BLKSIZE
                     ],
-                    # AF ~ AJ
+                    # 元数据 (写入 AF~AJ 列)
                     "vals_meta": [
-                        res_data.get("STATUS", "Done"), # AF: 标记状态
-                        jcl_name,                       # AG: JCL名
-                        safe_val(meta.get("STEP")),     # AH: STEP
-                        safe_val(meta.get("PGM")),      # AI: PGM
-                        safe_val(meta.get("DD"))        # AJ: DD
+                        result.get("STATUS", "完成"),  # AF: 处理状态
+                        jcl_name,                       # AG: JCL 文件名
+                        safe_val(meta.get("STEP")),     # AH: STEP 名称
+                        safe_val(meta.get("PGM")),      # AI: 程序名
+                        safe_val(meta.get("DD"))        # AJ: DD 名称
                     ]
                 })
 
-    # --- Phase 3: 分批回写 ---
+    logger.info(f"  解析完成: 共 {len(updates_buffer):,} 条待更新数据")
+
+    # ========== 阶段 3: 回写 Excel ==========
     if updates_buffer:
         total = len(updates_buffer)
-        logger.info(f"✍️ [Phase 3] 启动回填，共 {total} 条数据 (Sheet: {TARGET_SHEET_NAME})")
+        logger.info(f"[阶段 3/3] 回写 Excel (共 {total:,} 条)")
         
         app = xw.App(visible=True)
         app.screen_updating = False
@@ -340,51 +482,63 @@ def main():
         
         try:
             wb = app.books.open(TARGET_PATH)
-            app.calculation = 'manual' # 关闭自动计算
+            app.calculation = 'manual'  # 关闭自动计算以提升性能
             
-            try: ws = wb.sheets[TARGET_SHEET_NAME]
-            except: ws = wb.sheets[0]
+            try:
+                ws = wb.sheets[TARGET_SHEET_NAME]
+            except:
+                ws = wb.sheets[0]
 
             for start_idx in range(0, total, BATCH_SIZE):
                 end_idx = min(start_idx + BATCH_SIZE, total)
-                current_batch = updates_buffer[start_idx : end_idx]
+                current_batch = updates_buffer[start_idx:end_idx]
                 
-                print(f"\n--- ⚡ 正在处理第 {start_idx + 1} 到 {end_idx} 行 ---")
-                t0 = time.time()
+                print(f"\n处理进度: {start_idx + 1} ~ {end_idx} / {total}")
+                batch_start = time.time()
                 
                 for i, item in enumerate(current_batch):
-                    r = item["row"]
-                    # 1. 填物理属性 (Z-AC) => Z列是第26列
-                    ws.range((r, 26)).value = item["vals_attr"]
+                    row_num = item["row"]
                     
-                    # 2. 填元数据 (AF-AJ) => AF列是第32列
-                    # AF=32, AG=33, AH=34, AI=35, AJ=36
-                    ws.range((r, 32)).value = item["vals_meta"]
+                    # 写入物理属性 (Z=26, AA=27, AB=28, AC=29)
+                    ws.range((row_num, 26)).value = item["vals_attr"]
                     
-                    if i % 50 == 0: print(f"\r   ... 进度: {i}/{len(current_batch)}", end="")
+                    # 写入元数据 (AF=32, AG=33, AH=34, AI=35, AJ=36)
+                    ws.range((row_num, 32)).value = item["vals_meta"]
+                    
+                    if i % 50 == 0:
+                        print(f"\r  进度: {i}/{len(current_batch)}", end="")
                 
-                print(f"\n   ⏱️ 本批耗时: {time.time() - t0:.2f}s")
+                batch_time = time.time() - batch_start
+                print(f"\n  本批耗时: {batch_time:.2f} 秒")
                 wb.save()
                 
+                # 分批确认 (可选)
                 if end_idx < total:
-                    # ⚠️ 注意: 自动化运行时建议注释掉下面这行 input
-                    if input(f"   ❓ 继续? [Y/n] >> ").strip().lower() == 'n': break
+                    user_input = input("继续处理下一批? [Y/n]: ").strip().lower()
+                    if user_input == 'n':
+                        logger.info("用户中断处理")
+                        break
         
         except Exception as e:
-            logger.error(f"❌ 异常: {e}")
-            import traceback; traceback.print_exc()
+            logger.error(f"写入 Excel 时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
+        
         finally:
             try:
-                app.calculation = 'automatic' # 恢复设置
+                app.calculation = 'automatic'
                 app.screen_updating = True
                 wb.close()
                 app.quit()
-                logger.info("👋 完成")
-            except: pass
+            except:
+                pass
     else:
-        logger.info("⚠️ 没有数据更新。")
+        logger.info("没有需要更新的数据")
 
-    logger.info(f"🏁 总耗时: {time.time() - start_time:.2f}s")
+    total_time = time.time() - start_time
+    logger.info(f"========== 任务完成 ==========")
+    logger.info(f"总耗时: {total_time:.2f} 秒")
+
 
 if __name__ == "__main__":
     main()
